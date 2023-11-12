@@ -92,7 +92,7 @@
                 :item="item"
                 :price="item.goldValue ? item.goldValue : item.value"
                 :price-type="item.goldValue ? 'gold' : 'gem'"
-                :item-content-class="'inventory_quest_scroll_'+item.key"
+                :item-content-class="`inventory_quest_scroll_${item.key}`"
                 :empty-item="false"
                 :popover-position="'top'"
                 @click="selectItem(item)"
@@ -447,7 +447,6 @@ function removeStopwordsFromText (text, language) {
     de: stopword.deu,
     en: stopword.eng,
     en_GB: stopword.eng,
-    'en@pirate': stopword.eng.concat(["th'"]),
     es: stopword.spa,
     es_419: stopword.spa,
     fr: stopword.fra,
@@ -463,7 +462,6 @@ function removeStopwordsFromText (text, language) {
     ro: stopword.ron,
     ru: stopword.rus,
     sk: stopword.slv,
-    // sr: stopword.,
     sv: stopword.swe,
     tr: stopword.tur,
     uk: stopword.ukr,

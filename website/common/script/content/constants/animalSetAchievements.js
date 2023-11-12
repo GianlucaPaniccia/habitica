@@ -26,6 +26,20 @@ const ANIMAL_SET_ACHIEVEMENTS = {
     achievementKey: 'birdsOfAFeather',
     notificationType: 'ACHIEVEMENT_ANIMAL_SET',
   },
+  bonelessBoss: {
+    type: 'pet',
+    species: [
+      'Beetle',
+      'Butterfly',
+      'Cuttlefish',
+      'Nudibranch',
+      'Octopus',
+      'Snail',
+      'Spider',
+    ],
+    achievementKey: 'bonelessBoss',
+    notificationType: 'ACHIEVEMENT_ANIMAL_SET',
+  },
   dinosaurDynasty: {
     type: 'pet',
     species: [
@@ -56,6 +70,19 @@ const ANIMAL_SET_ACHIEVEMENTS = {
       'Cow',
     ],
     achievementKey: 'domesticated',
+    notificationType: 'ACHIEVEMENT_ANIMAL_SET',
+  },
+  duneBuddy: {
+    type: 'pet',
+    species: [
+      'Armadillo',
+      'Cactus',
+      'Fox',
+      'Frog',
+      'Snake',
+      'Spider',
+    ],
+    achievementKey: 'duneBuddy',
     notificationType: 'ACHIEVEMENT_ANIMAL_SET',
   },
   plantParent: {

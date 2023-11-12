@@ -178,6 +178,11 @@ const animalSetAchievs = {
     titleKey: 'achievementBirdsOfAFeather',
     textKey: 'achievementBirdsOfAFeatherText',
   },
+  bonelessBoss: {
+    icon: 'achievement-bonelessBoss',
+    titleKey: 'achievementBonelessBoss',
+    textKey: 'achievementBonelessBossText',
+  },
   dinosaurDynasty: {
     icon: 'achievement-dinosaurDynasty',
     titleKey: 'achievementDinosaurDynasty',
@@ -187,6 +192,11 @@ const animalSetAchievs = {
     icon: 'achievement-domesticated',
     titleKey: 'achievementDomesticated',
     textKey: 'achievementDomesticatedText',
+  },
+  duneBuddy: {
+    icon: 'achievement-duneBuddy',
+    titleKey: 'achievementDuneBuddy',
+    textKey: 'achievementDuneBuddyText',
   },
   plantParent: {
     icon: 'achievement-plantParent',

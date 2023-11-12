@@ -20,7 +20,6 @@ import csvStringify from '../../libs/csvStringify';
 import {
   createTasks,
 } from '../../libs/tasks';
-
 import {
   addUserJoinChallengeNotification,
   getChallengeGroupResponse,
@@ -29,8 +28,12 @@ import {
   createChallengeQuery,
 } from '../../libs/challenges';
 import apiError from '../../libs/apiError';
-
 import common from '../../../common';
+import {
+  clearFlags,
+  flagChallenge,
+  notifyOfFlaggedChallenge,
+} from '../../libs/challenges/reporting';
 
 const { MAX_SUMMARY_SIZE_FOR_CHALLENGES } = common.constants;
 
@@ -264,9 +267,10 @@ api.joinChallenge = {
     if (!challenge) throw new NotFound(res.t('challengeNotFound'));
 
     const group = await Group.getGroup({
-      user, groupId: challenge.group, fields: basicGroupFields, optionalMembership: true,
+      user, groupId: challenge.group, fields: `${basicGroupFields} purchased`, optionalMembership: true,
     });
     if (!group || !challenge.canJoin(user, group)) throw new NotFound(res.t('challengeNotFound'));
+    group.purchased = undefined;
 
     const addedSuccessfully = await challenge.addToUser(user);
     if (!addedSuccessfully) {
@@ -365,7 +369,7 @@ api.leaveChallenge = {
  * @apiParam (Query) {Number} page This parameter can be used to specify the page number
                                    for the user challenges result (the initial page is number 0).
  * @apiParam (Query) {String} [member] If set to `true` it limits results to challenges where the
-                                       user is a member.
+                                       user is a member, or the user owns the challenge.
  * @apiParam (Query) {String} [owned] If set to `owned` it limits results to challenges owned
                                       by the user. If set to `not_owned` it limits results
                                       to challenges not owned by the user.
@@ -393,47 +397,72 @@ api.getUserChallenges = {
     if (validationErrors) throw validationErrors;
 
     const CHALLENGES_PER_PAGE = 10;
-    const { page } = req.query;
-
+    const {
+      categories,
+      member,
+      owned,
+      page,
+      search,
+    } = req.query;
     const { user } = res.locals;
-    const orOptions = [
-      { _id: { $in: user.challenges } }, // Challenges where the user is participating
-    ];
-
-    orOptions.push({ leader: user._id });
-
-    if (!req.query.member) {
-      orOptions.push({
-        group: { $in: user.getGroups() },
-      }); // Challenges in groups where I'm a member
-    }
 
     const query = {
-      $and: [{ $or: orOptions }],
+      $and: [],
     };
 
-    const { owned } = req.query;
-    if (owned) {
-      if (owned === 'not_owned') {
-        query.$and.push({ leader: { $ne: user._id } });
-      }
-
-      if (owned === 'owned') {
-        query.$and.push({ leader: user._id });
-      }
+    if (!user.hasPermission('moderator')) {
+      query.$and.push(
+        {
+          $or: [
+            { flagCount: { $not: { $gt: 1 } } },
+            { leader: user._id },
+          ],
+        },
+      );
     }
 
-    if (req.query.search) {
+    // Challenges the user owns
+    const orOptions = [{ leader: user._id }];
+
+    // Challenges where the user is participating
+    if (user.challenges.length > 0) {
+      orOptions.push({ _id: { $in: user.challenges } });
+    }
+
+    // Challenges in groups user is a member of, plus public challenges
+    if (!member) {
+      const userGroups = await Group.getGroups({
+        user,
+        types: ['party', 'guilds', 'tavern'],
+      });
+      const userGroupIds = userGroups.map(userGroup => userGroup._id);
+      orOptions.push({
+        group: { $in: userGroupIds },
+      });
+    }
+    if (owned === 'not_owned') {
+      query.leader = { $ne: user._id }; // Show only Challenges user does not own
+    } else if (owned === 'owned') {
+      query.leader = user._id; // Show only Challenges user owns
+    } else {
+      orOptions.push(
+        { leader: user._id }, // Additionally show Challenges user owns
+      );
+    }
+
+    query.$and.push({ $or: orOptions });
+
+    if (search) {
       const searchOr = { $or: [] };
-      const searchWords = _.escapeRegExp(req.query.search).split(' ').join('|');
+      const searchWords = _.escapeRegExp(search).split(' ').join('|');
       const searchQuery = { $regex: new RegExp(`${searchWords}`, 'i') };
       searchOr.$or.push({ name: searchQuery });
       searchOr.$or.push({ description: searchQuery });
       query.$and.push(searchOr);
     }
 
-    if (req.query.categories) {
-      const categorySlugs = req.query.categories.split(',');
+    if (categories) {
+      const categorySlugs = categories.split(',');
       query.categories = { $elemMatch: { slug: { $in: categorySlugs } } };
     }
 
@@ -492,7 +521,7 @@ api.getGroupChallenges = {
   url: '/challenges/groups/:groupId',
   middlewares: [authWithHeaders({
     // Some fields (including _id) are always loaded (see middlewares/auth)
-    userFieldsToInclude: ['party', 'guilds'], // Some fields are always loaded (see middlewares/auth)
+    userFieldsToInclude: ['party', 'guilds', 'contributor'], // Some fields are always loaded (see middlewares/auth)
   })],
   async handler (req, res) {
     const { user } = res.locals;
@@ -514,7 +543,18 @@ api.getGroupChallenges = {
       // .populate('leader', nameFields)
       .exec();
 
-    const resChals = challenges.map(challenge => (new Challenge(challenge)).toJSON());
+    const resChals = challenges.map(challenge => {
+      // filter out challenges that the non-admin user isn't participating in, nor created
+      const nonParticipant = !user.challenges
+        || (user.challenges
+        && user.challenges.findIndex(cId => cId === challenge._id) === -1);
+      const isFlaggedForNonAdminUser = challenge.flagCount > 1
+        && !user.hasPermission('moderator')
+        && nonParticipant
+        && challenge.leader !== user._id;
+
+      return isFlaggedForNonAdminUser ? null : (new Challenge(challenge)).toJSON();
+    }).filter(challenge => !!challenge);
 
     // Instead of populate we make a find call manually because of https://github.com/Automattic/mongoose/issues/3833
     await Promise.all(resChals.map((chal, index) => User
@@ -563,14 +603,26 @@ api.getChallenge = {
 
     if (!challenge) throw new NotFound(res.t('challengeNotFound'));
 
+    const nonParticipant = !user.challenges
+      || (user.challenges
+      && user.challenges.findIndex(cId => cId === challenge._id) === -1);
+    const isFlaggedForNonAdminUser = challenge.flagCount > 1
+      && !user.hasPermission('moderator')
+      && nonParticipant
+      && challenge.leader !== user._id;
+    if (isFlaggedForNonAdminUser) throw new NotFound(res.t('challengeNotFound'));
+
     // Fetching basic group data
     const group = await Group.getGroup({
-      user, groupId: challenge.group, fields: basicGroupFields, optionalMembership: true,
+      user, groupId: challenge.group, fields: `${basicGroupFields} purchased`,
     });
-    if (!group || !challenge.canView(user, group)) throw new NotFound(res.t('challengeNotFound'));
-
+    if (!group && !challenge.canView(user, group)) throw new NotFound(res.t('challengeNotFound'));
     const chalRes = challenge.toJSON();
-    chalRes.group = group.toJSON({ minimize: true });
+    if (group) {
+      group.purchased = undefined;
+      chalRes.group = group.toJSON({ minimize: true });
+    }
+
     // Instead of populate we make a find call manually because of https://github.com/Automattic/mongoose/issues/3833
     const chalLeader = await User.findById(chalRes.leader).select(nameFields).exec();
     chalRes.leader = chalLeader ? chalLeader.toJSON({ minimize: true }) : null;
@@ -724,11 +776,11 @@ api.updateChallenge = {
     if (!challenge) throw new NotFound(res.t('challengeNotFound'));
 
     const group = await Group.getGroup({
-      user, groupId: challenge.group, fields: basicGroupFields, optionalMembership: true,
+      user, groupId: challenge.group, fields: `${basicGroupFields} purchased`, optionalMembership: true,
     });
     if (!group || !challenge.canView(user, group)) throw new NotFound(res.t('challengeNotFound'));
     if (!challenge.canModify(user)) throw new NotAuthorized(res.t('onlyLeaderUpdateChal'));
-
+    group.purchased = undefined;
     _.merge(challenge, Challenge.sanitizeUpdate(req.body));
 
     const savedChal = await challenge.save();
@@ -815,6 +867,15 @@ api.selectChallengeWinner = {
     if (!challenge) throw new NotFound(res.t('challengeNotFound'));
     if (!challenge.canModify(user)) throw new NotAuthorized(res.t('onlyLeaderDeleteChal'));
 
+    const nonParticipant = !user.challenges
+      || (user.challenges
+      && user.challenges.findIndex(cId => cId === challenge._id) === -1);
+    const isFlaggedForNonAdminUser = challenge.flagCount > 1
+      && !user.hasPermission('moderator')
+      && nonParticipant
+      && challenge.leader !== user._id;
+    if (isFlaggedForNonAdminUser) throw new NotFound(res.t('challengeNotFound'));
+
     const winner = await User.findOne({ _id: req.params.winnerId }).exec();
     if (!winner || winner.challenges.indexOf(challenge._id) === -1) throw new NotFound(res.t('winnerNotFound', { userId: req.params.winnerId }));
 
@@ -864,6 +925,15 @@ api.cloneChallenge = {
     const challengeToClone = await Challenge.findOne({ _id: req.params.challengeId }).exec();
     if (!challengeToClone) throw new NotFound(res.t('challengeNotFound'));
 
+    const nonParticipant = !user.challenges
+      || (user.challenges
+      && user.challenges.findIndex(cId => cId === challengeToClone._id) === -1);
+    const isFlaggedForNonAdminUser = challengeToClone.flagCount > 1
+      && !user.hasPermission('moderator')
+      && nonParticipant
+      && challengeToClone.leader !== user._id;
+    if (isFlaggedForNonAdminUser) throw new NotFound(res.t('challengeNotFound'));
+
     const { savedChal } = await createChallenge(user, req, res);
 
     const challengeTaskIds = [
@@ -894,6 +964,76 @@ api.cloneChallenge = {
     const clonedTasks = await createTasks(taskRequest, res, { user, challenge: savedChal });
 
     res.respond(200, { clonedTasks, clonedChallenge: savedChal });
+  },
+};
+
+/**
+ * @api {post} /api/v3/challenges/:challengeId/flag Flag a challenge
+ * @apiName FlagChallenge
+ * @apiGroup Challenge
+ *
+ * @apiParam (Path) {UUID} challengeId The _id for the challenge to flag
+ * @apiParam (Body) {String} [comment] Why the message was flagged
+ *
+ * @apiSuccess {Object} data The flagged challenge message
+ *
+ * @apiUse ChallengeNotFound
+ */
+api.flagChallenge = {
+  method: 'POST',
+  url: '/challenges/:challengeId/flag',
+  middlewares: [authWithHeaders()],
+  async handler (req, res) {
+    const { user } = res.locals;
+
+    req.checkParams('challengeId', res.t('challengeIdRequired')).notEmpty().isUUID();
+
+    const validationErrors = req.validationErrors();
+    if (validationErrors) throw validationErrors;
+
+    const challenge = await Challenge.findOne({ _id: req.params.challengeId }).exec();
+    if (!challenge) throw new NotFound(res.t('challengeNotFound'));
+
+    await flagChallenge(challenge, user, res);
+    await notifyOfFlaggedChallenge(challenge, user, req.body.comment);
+
+    res.respond(200, { challenge });
+  },
+};
+
+/**
+ * @api {post} /api/v3/challenges/:challengeId/clearflags Clears flags on a challenge
+ * @apiName ClearFlagsChallenge
+ * @apiGroup Challenge
+ *
+ * @apiParam (Path) {UUID} challengeId The _id for the challenge to clear flags from
+ *
+ * @apiSuccess {Object} data The flagged challenge message
+ *
+ * @apiUse ChallengeNotFound
+ */
+api.clearFlagsChallenge = {
+  method: 'POST',
+  url: '/challenges/:challengeId/clearflags',
+  middlewares: [authWithHeaders()],
+  async handler (req, res) {
+    const { user } = res.locals;
+
+    req.checkParams('challengeId', res.t('challengeIdRequired')).notEmpty().isUUID();
+
+    const validationErrors = req.validationErrors();
+    if (validationErrors) throw validationErrors;
+
+    if (!user.hasPermission('moderator')) {
+      throw new NotAuthorized(res.t('messageGroupChatAdminClearFlagCount'));
+    }
+
+    const challenge = await Challenge.findOne({ _id: req.params.challengeId }).exec();
+    if (!challenge) throw new NotFound(res.t('challengeNotFound'));
+
+    await clearFlags(challenge, user);
+
+    res.respond(200, { challenge });
   },
 };
 
